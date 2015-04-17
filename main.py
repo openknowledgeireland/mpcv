@@ -7,6 +7,7 @@ import math
 import logging
 import json
 import datetime
+import itertools
 
 import werkzeug
 import flask
@@ -41,7 +42,7 @@ def sitemap_generator():
     yield 'about', {}
 
     for size in ['small', 'medium', 'large']:
-        for view in ['recent', 'constituency']:
+        for view in ['recent', 'constituency', 'party']:
             yield 'browse', { 'size': size, 'view': view }
 
     all_cvs = _cache_all_cvs()
@@ -167,7 +168,7 @@ def _cache_all_constituencies():
 
 @cache.memoize(60 * 10)
 def _cache_candidates_augmented(constituency_id):
-    all_candidates = lookups.lookup_candidates(constituency_id)
+    all_candidates = lookups.lookup_candidates(app.config, constituency_id)
     if 'error' in all_candidates:
         return all_candidates
     all_candidates = lookups.augment_if_has_cv(app.config, all_candidates)
@@ -197,13 +198,13 @@ def old_all_cvs_3(size):
 def browse(view, size):
     if size not in ['small', 'medium', 'large']:
         return flask.redirect(flask.url_for("browse", view=view, size="large"))
-    if view not in ['recent', 'constituency']:
+    if view not in ['recent', 'constituency', 'party']:
         return flask.redirect(flask.url_for("browse", view="recent", size=size))
 
     if view == 'recent':
         all_cvs = _cache_all_cvs()
         return flask.render_template('browse.html',
-                cvs = all_cvs,
+                cv_groups = [{ 'heading': None, 'cvs': all_cvs }],
                 size = size,
                 view = view
         )
@@ -211,6 +212,19 @@ def browse(view, size):
         all_constituencies = _cache_all_constituencies()
         return flask.render_template('browse.html',
                 constituencies = all_constituencies,
+                size = size,
+                view = view
+        )
+    if view == 'party':
+        all_cvs = _cache_all_cvs()
+        # sort parties alphabetically
+        all_cvs = sorted(all_cvs, key=lambda k: k['candidate']['party'])
+        cv_groups = []
+        for party, cvs in itertools.groupby(all_cvs, key=lambda k: k['candidate']['party']):
+            # sort within each party in forewards data order of uploading CV
+            cv_groups.append({'heading': party, 'cvs': sorted(list(cvs), key=lambda k: k['last_modified'])})
+        return flask.render_template('browse.html',
+                cv_groups = cv_groups,
                 size = size,
                 view = view
         )
@@ -235,7 +249,7 @@ def clear_all():
     return flask.redirect("/")
 
 #####################################################################
-# List candidates and view their CVs
+# List candidates
 
 @app.route('/candidates')
 @app.route('/email_candidates')
@@ -244,8 +258,22 @@ def candidates_your_constituency():
     if 'constituency' not in flask.session:
         return flask.redirect("/")
 
+    from_front_page = flask.request.args.get("from-front-page", None)
+
     constituency = flask.session['constituency']
-    return flask.redirect(flask.url_for("candidates", constituency_id = constituency['id']))
+    return flask.redirect(
+        flask.url_for(
+            flask.request.url_rule.rule.replace("/", ""),
+            constituency_id = constituency['id'],
+            from_front_page = from_front_page
+        )
+    )
+
+def _can_tweet(candidates_no_cv):
+    for candidate in candidates_no_cv:
+        if 'twitter' in candidate and candidate['twitter'] is not None:
+           return True
+    return False
 
 @app.route('/candidates/<int:constituency_id>')
 def candidates(constituency_id = None):
@@ -259,12 +287,7 @@ def candidates(constituency_id = None):
         'id': constituency_id,
         'name': all_candidates[0]['constituency_name']
     }
-
-    show_twitter_button = False
-    for candidate in candidates_no_cv:
-        if 'twitter' in candidate and candidate['twitter'] is not None:
-            show_twitter_button = True
-            break
+    show_twitter_button = _can_tweet(candidates_no_cv)
 
     # should we show subscribe button?
     from_email = ""
@@ -310,10 +333,14 @@ def candidates(constituency_id = None):
     )
 
 
+#####################################################################
+# Viewing individual CVs
+
+
 # GET is to show form to upload CV
 @app.route('/show_cv/<int:person_id>')
 def show_cv(person_id):
-    candidate = lookups.lookup_candidate(person_id)
+    candidate = lookups.lookup_candidate(app.config, person_id)
     if 'error' in candidate:
         flask.flash(candidate['error'], 'danger')
         return error()
@@ -355,7 +382,7 @@ def show_cv(person_id):
 # POST when they click the button to send the confirm email
 @app.route('/upload_cv/<int:person_id>', methods=['GET','POST'])
 def upload_cv(person_id):
-    candidate = lookups.lookup_candidate(person_id)
+    candidate = lookups.lookup_candidate(app.config, person_id)
     if 'error' in candidate:
         flask.flash(candidate['error'], 'danger')
         return error()
@@ -364,11 +391,13 @@ def upload_cv(person_id):
         identity.send_upload_cv_confirmation(app, mail, candidate['id'], candidate['email'], candidate['name'])
         return flask.render_template("check_email.html", candidate=candidate)
 
+    already_got = False
     if lookups.get_current_cv(app.config, person_id):
-        return flask.redirect(flask.url_for('show_cv', person_id=person_id))
+        already_got = True
 
     return flask.render_template("upload_cv.html", candidate=candidate,
-        og_image = flask.url_for('static', filename='what-is-cv.png', _external=True)
+        og_image = flask.url_for('static', filename='what-is-cv.png', _external=True),
+        already_got = already_got
     )
 
 # Administrator get a confirm link
@@ -378,7 +407,7 @@ def upload_cv_admin(person_id, admin_key):
         flask.flash("Administrator permissions denied.", 'danger')
         return error()
 
-    candidate = lookups.lookup_candidate(person_id)
+    candidate = lookups.lookup_candidate(app.config, person_id)
     if 'error' in candidate:
         flask.flash(candidate['error'], 'danger')
         return error()
@@ -390,7 +419,7 @@ def upload_cv_admin(person_id, admin_key):
 # GET is to show form to upload CV
 @app.route('/upload_cv/<int:person_id>/c/<signature>', methods=['GET'])
 def upload_cv_confirmed(person_id, signature):
-    candidate = lookups.lookup_candidate(person_id)
+    candidate = lookups.lookup_candidate(app.config, person_id)
     if 'error' in candidate:
         flask.flash(candidate['error'], 'danger')
         return error()
@@ -413,7 +442,7 @@ def upload_cv_confirmed(person_id, signature):
 # POST is actual receiving of CV
 @app.route('/upload_cv/<int:person_id>/c/<signature>', methods=['POST'])
 def upload_cv_upload(person_id, signature):
-    candidate = lookups.lookup_candidate(person_id)
+    candidate = lookups.lookup_candidate(app.config, person_id)
     if 'error' in candidate:
         flask.flash(candidate['error'], 'danger')
         return error()
@@ -442,6 +471,7 @@ def upload_cv_upload(person_id, signature):
     flask.flash("Friends who are also candidates? Please tell them to upload their CV too!", 'info')
     return flask.redirect("/about")
 
+
 #####################################################################
 # Ask candidates to upload their CV
 
@@ -453,6 +483,9 @@ def email_candidates(constituency_id):
         return error()
     (candidates_no_cv, candidates_no_email, candidates_have_cv) = lookups.split_candidates_by_type(app.config, all_candidates)
 
+    if len(candidates_no_cv) == 0:
+        return flask.redirect(flask.url_for("candidates", constituency_id=constituency_id))
+
     constituency = {
         'id': constituency_id,
         'name': all_candidates[0]['constituency_name']
@@ -461,6 +494,7 @@ def email_candidates(constituency_id):
     emails_list = ", ".join([c['email'] for c in candidates_no_cv])
     names_list = ", ".join([c['name'] for c in candidates_no_cv])
 
+    show_twitter_button = _can_tweet(candidates_no_cv)
 
     original_message = """I'm a resident of your constituency.
 
@@ -487,11 +521,18 @@ Yours sincerely,
 
 """.format(count=len(candidates_have_cv))
 
-
-
     from_email = ""
     if 'email' in flask.session:
         from_email = flask.session['email']
+
+    # if came from front page, and they emailed before, don't force it
+    from_front_page = flask.request.args.get("from_front_page")
+    if from_email and from_front_page:
+        return flask.redirect(flask.url_for("candidates", constituency_id=constituency_id))
+
+    tempt_text = False
+    if len(candidates_have_cv) > 0 and from_front_page:
+        tempt_text = True
 
     message = original_message
     subject = ""
@@ -529,7 +570,9 @@ Yours sincerely,
         names_list=names_list,
         from_email=from_email,
         subject=subject,
-        message=message
+        message=message,
+        show_twitter_button=show_twitter_button,
+        tempt_text=tempt_text
     )
 
 @app.route('/tweet_candidates/<int:constituency_id>')

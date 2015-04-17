@@ -70,20 +70,18 @@ def lookup_postcode(postcode):
 #   name - name of the candidate
 #   email - email address of the candidate (if known)
 #   twitter - Twitter account name of the candidate (if known)
+#   linkedin_url - LinkedIn page of the candidate (if known)
 #   party - political party name of the candidate
 #   constituency_id - identifier of constituency
 #   constituency_name - name of constituency
 @main.cache.memoize(60 * 60)
-def _hashes_of_candidates():
+def _hashes_of_candidates(config):
     print("warming cache _hashes_of_candidates")
 
     by_candidate_id = {}
     by_constituency_id = collections.defaultdict(list)
 
-    url = "https://yournextmp.com/media/candidates.csv"
-    r = requests.get(url)
-    r.encoding = 'utf-8'
-    rows = csv.DictReader(io.StringIO(r.text))
+    rows = _fetch_candidates(config)
     for row in rows:
         candidate_id = int(row['id'])
         constituency_id = int(row['mapit_id'])
@@ -98,6 +96,7 @@ def _hashes_of_candidates():
             'name': row['name'],
             'email': row['email'],
             'twitter': row['twitter_username'],
+            'linkedin_url': row['linkedin_url'],
             'party': row['party'],
             'constituency_id': constituency_id,
             'constituency_name': row['constituency']
@@ -111,25 +110,45 @@ def _hashes_of_candidates():
 
     return by_candidate_id, by_constituency_id
 
+def _fetch_candidates(config):
+    bucket = _get_s3_bucket(config)
+    key_name = "cache/candidates.csv"
+
+    url = "https://yournextmp.com/media/candidates.csv"
+    r = requests.get(url)
+
+    if r.status_code == 200:
+        r.encoding = 'utf-8'
+        text = r.text
+        # save to bucket
+        key = boto.s3.key.Key(bucket)
+        key.key = key_name
+        key.set_contents_from_string(text)
+    else:
+        print("couldn't read from YourNextMP; loading candidates from S3")
+        key = bucket.get_key(key_name)
+        text = key.get_contents_as_string().decode('utf-8')
+
+    return csv.DictReader(io.StringIO(text))
 
 # Takes a constituency identifier and returns a dictionary:
 #   error - if there was an error
 # Or an array of dictionaries with fields as in _hashes_of_candidates.
-def lookup_candidates(constituency_id):
+def lookup_candidates(config, constituency_id):
     if constituency_id == 8888888:
         return [
-            { 'id': 7777777, 'name' : 'Sicnarf Gnivri', 'email': 'frabcus+sicnarf@fastmail.fm', 'twitter': 'frabcus+sicnarf', 'party': 'Bunny Rabbits Rule',
+            { 'id': 7777777, 'name' : 'Sicnarf Gnivri', 'email': 'frabcus+sicnarf@fastmail.fm', 'twitter': 'frabcus+sicnarf', 'linkedin_url': 'https://www.linkedin.com/in/FrancisIrving', 'party': 'Bunny Rabbits Rule',
                 'constituency_id': 8888888, 'constituency_name': "Democracy Club Test Constituency"
             },
-            { 'id': 7777778, 'name' : 'Notlits Esuom', 'email': 'frabcus+notlits@fastmail.fm', 'twitter': 'frabcus+notlits', 'party': 'Mice Rule More',
+            { 'id': 7777778, 'name' : 'Notlits Esuom', 'email': 'frabcus+notlits@fastmail.fm', 'twitter': 'frabcus+notlits', 'linkedin_url': 'https://www.linkedin.com/in/FrancisIrving', 'party': 'Mice Rule More',
                 'constituency_id': 8888888, 'constituency_name': "Democracy Club Test Constituency"
             },
-            { 'id': 7777779, 'name' : 'Ojom Yeknom', 'email': 'frabcus+ojom@fastmail.fm', 'twitter': None, 'party': 'Monkeys Are Best',
+            { 'id': 7777779, 'name' : 'Ojom Yeknom', 'email': 'frabcus+ojom@fastmail.fm', 'twitter': None, 'linkedin_url': None, 'party': 'Monkeys Are Best',
                 'constituency_id': 8888888, 'constituency_name': "Democracy Club Test Constituency"
             }
         ]
 
-    _, by_constituency_id = _hashes_of_candidates()
+    _, by_constituency_id = _hashes_of_candidates(config)
 
     if constituency_id not in by_constituency_id:
         return { 'error': "Constituency {} not found".format(constituency_id)}
@@ -145,24 +164,24 @@ def lookup_candidates(constituency_id):
 # Takes a candidate identifier (mySociety person_id) and returns a dictionary:
 #   error - if there's an error
 # Or fields as in _hashes_of_candidates.
-def lookup_candidate(person_id):
+def lookup_candidate(config, person_id):
     if person_id == 7777777:
         return {
-            'id': 7777777, 'name' : 'Sicnarf Gnivri', 'email': 'frabcus+sicnarf@fastmail.fm', 'twitter': 'frabcus+sicnarf', 'party': 'Bunny Rabbits Rule',
+            'id': 7777777, 'name' : 'Sicnarf Gnivri', 'email': 'frabcus+sicnarf@fastmail.fm', 'twitter': 'frabcus+sicnarf', 'linkedin_url': 'https://www.linkedin.com/in/FrancisIrving', 'party': 'Bunny Rabbits Rule',
             'constituency_id': 8888888, 'constituency_name': "Democracy Club Test Constituency"
         }
     if person_id == 7777778:
         return {
-            'id': 7777778, 'name' : 'Notlits Esuom', 'email': 'frabcus+notlits@fastmail.fm', 'twitter': 'frabcus+notlits', 'party': 'Mice Rule More',
+            'id': 7777778, 'name' : 'Notlits Esuom', 'email': 'frabcus+notlits@fastmail.fm', 'twitter': 'frabcus+notlits', 'linkedin_url': 'https://www.linkedin.com/in/FrancisIrving', 'party': 'Mice Rule More',
             'constituency_id': 8888888, 'constituency_name': "Democracy Club Test Constituency"
         }
     if person_id == 7777779:
         return {
-            'id': 7777779, 'name' : 'Ojom Yeknom', 'email': 'frabcus+ojom@fastmail.fm', 'twitter': None, 'party': 'Monkeys Are Best',
+            'id': 7777779, 'name' : 'Ojom Yeknom', 'email': 'frabcus+ojom@fastmail.fm', 'twitter': None, 'linkedin_url': None, 'party': 'Monkeys Are Best',
             'constituency_id': 8888888, 'constituency_name': "Democracy Club Test Constituency"
         }
 
-    by_candidate_id, _ = _hashes_of_candidates()
+    by_candidate_id, _ = _hashes_of_candidates(config)
 
     if person_id not in by_candidate_id:
         return { 'error': "Candidate {} not found".format(person_id) }
@@ -177,7 +196,7 @@ def lookup_candidate(person_id):
 # from _hashes_of_candidates and from augment_if_has_cv.
 def all_constituencies(config):
 
-    _, by_constituency_id = _hashes_of_candidates()
+    _, by_constituency_id = _hashes_of_candidates(config)
 
     result = []
     for constituency_id, candidates in by_constituency_id.items():
@@ -284,7 +303,10 @@ def all_cvs_with_thumbnails(config):
         if cv['person_id'] in thumb_hash:
             cv['has_thumb'] = True
             cv['thumb'] = thumb_hash[person_id]
-            cvs.append(cv)
+            cv['candidate'] = lookup_candidate(config, cv['person_id'])
+            # can have CVs for people who aren't candidates (e.g. withdrew)
+            if 'error' not in cv['candidate']:
+                cvs.append(cv)
 
     return cvs
 
@@ -426,7 +448,7 @@ def slow_updates_list(config):
             continue
         last_modified = boto.utils.parse_ts(key.last_modified)
 
-        candidates = lookup_candidates(constituency['id'])
+        candidates = lookup_candidates(config, constituency['id'])
         if 'errors' in candidates:
             print("ERROR looking up candidates", postcode)
             continue
